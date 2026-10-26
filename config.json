@@ -1,0 +1,12 @@
+{
+  "database": {"host": "localhost", "port": 5432, "dbname": "mercado", "user": "mercado", "password_env": "MERCADO_DB_PASSWORD"},
+  "provider": {"name": "twelvedata", "api_key_env": "TWELVE_DATA_API_KEY", "timezone": "UTC"},
+  "assets": [
+    {"id": "BOVA11", "symbol": "BOVA11", "exchange": "B3", "currency": "BRL", "kind": "ETF", "timezone": "America/Sao_Paulo"},
+    {"id": "IVVB11", "symbol": "IVVB11", "exchange": "B3", "currency": "BRL", "kind": "ETF", "timezone": "America/Sao_Paulo"},
+    {"id": "SPY", "symbol": "SPY", "exchange": "NYSE", "currency": "USD", "kind": "ETF", "timezone": "America/New_York"},
+    {"id": "QQQ", "symbol": "QQQ", "exchange": "NASDAQ", "currency": "USD", "kind": "ETF", "timezone": "America/New_York"},
+    {"id": "USD_BRL", "symbol": "USD/BRL", "currency": "BRL", "kind": "FX", "timezone": "UTC"},
+    {"id": "EUR_BRL", "symbol": "EUR/BRL", "currency": "BRL", "kind": "FX", "timezone": "UTC"}
+  ]
+}
