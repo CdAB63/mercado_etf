@@ -1,7 +1,6 @@
 services:
-  timescaledb:
-    image: timescale/timescaledb:latest-pg17
-    command: postgres -c shared_preload_libraries=timescaledb
+  postgres:
+    image: postgres:16
     environment:
       POSTGRES_DB: mercado
       POSTGRES_USER: mercado

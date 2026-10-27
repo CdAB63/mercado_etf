@@ -1,45 +1,107 @@
-# Mercado em perspectiva — protótipo 0.1
+# Mercado em perspectiva — versão 0.2.2
 
-Aplicação local de pesquisa para acompanhar BOVA11, IVVB11, SPY, QQQ, USD/BRL e EUR/BRL. Coleta manual de OHLC do Twelve Data, importação CSV, armazenamento PostgreSQL, gráficos, alerta por retorno anormal e autoencoder experimental em PyTorch com seleção automática CPU/CUDA.
+Aplicação local de pesquisa em Python/Streamlit/PostgreSQL. Esta versão consolida as correções anteriores e integra Yahoo Finance via yfinance para BOVA11 e IVVB11. Mantém Twelve Data para SPY, QQQ, USD/BRL e EUR/BRL. Não executa ordens, não gera recomendações de compra/venda e não possui estratégia validada. Autoencoder serve apenas à exploração de padrões e anomalias.
 
-## Estado e limites
+## Correção 0.2.2 — barras inválidas isoladas
 
-Este protótipo NÃO implementa recomendações de compra e venda, cenários probabilísticos, agrupamento de regimes, carteira, simulação, notícias ou coleta automática; são etapas futuras. O modelo é demonstrativo e não está validado como estratégia. Os preços nunca são enviados a corretoras e a aplicação não executa operações. A coleta da B3, os símbolos, cobertura, histórico e intervalos disponíveis dependem do plano do provedor e precisam ser verificados. Uma assinatura/chave gratuita não garante dados em tempo real. O sistema não tem calendário de pregões ou verificação automática de atraso; confira data da observação e fonte antes de usar. Dados intradiários podem ser parciais; o sistema não garante que a barra mais recente esteja fechada. Não usar para decisões financeiras sem confirmação independente.
+A coleta Yahoo agora separa as barras estruturalmente inválidas e grava as demais. As rejeições vão para bar_rejections, com ativo, fonte, intervalo, data, recebimento, motivo e valores retornados pelo yfinance (após normalização dos nomes das colunas). Não são respostas HTTP brutas. Na interface, abra “Barras em quarentena — valores recebidos e motivo”. NaN é representado por null no JSON; infinito por texto. Um OHLC ausente, não numérico, não finito, não positivo ou com máxima/mínima incoerente identifica o campo que falhou. Campos opcionais podem estar ausentes; valores presentes inválidos também vão para quarentena.
 
-Preços brutos não incluem automaticamente dividendos, desdobramentos ou ajuste por proventos. Consulte as regras do fornecedor e obtenha uma série ajustada confiável antes de análises de retornos ou treinamento. A troca de fontes pode produzir séries incompatíveis: selecione uma fonte por vez. Falhas de coleta não são preenchidas automaticamente. O autoencoder usa janelas de 20 retornos do mesmo ativo, treinamento cronológico de 75%, separação na fronteira para impedir sobreposição de janelas e teste posterior. O limiar é um percentil das perdas do treino, não uma probabilidade; não há validação walk-forward, análise de estabilidade ou comparação com estratégia passiva. CUDA é opcional.
+As barras válidas e as rejeições são gravadas na mesma transação. Nenhum preço é inventado, interpolado ou reparado. Uma grande variação com OHLC válido continua disponível e apenas sinalizada para revisão. Datas duplicadas, sem fuso, futuras, colunas obrigatórias ausentes e identidade/moeda divergentes ainda rejeitam o lote completo. CSV e Twelve Data mantêm a validação estrita do lote.
 
-## Instalação Linux
+As rejeições persistem após reiniciar a aplicação. Uma barra antiga na tabela bars para a mesma data/fonte não é apagada, mas fica oculta da análise enquanto sua rejeição estiver pendente. Na visualização e nos indicadores, a data rejeitada aparece como uma lacuna explícita; os retornos não atravessam essa lacuna. O treino permanece bloqueado enquanto houver pendências no histórico exibido. Uma coleta posterior que traga a mesma barra válida resolve a pendência. Se a data simplesmente desaparecer da resposta, a pendência continua. A base preserva somente a última rejeição por data/fonte, incluindo o motivo e os dados quando resolvida; não é um arquivo de todas as revisões.
 
-Requisitos: Python 3.10+ (3.11 recomendado), PostgreSQL 14+ ou Docker Compose, conta/API key Twelve Data. No terminal, a partir da pasta extraída:
+O erro de 2025-10-24 não permite saber qual campo está errado sem ver os valores. Esta versão permite verificá-los na interface. Não foi presumido feriado, evento corporativo ou erro específico do Yahoo. keepna=True continua ativo para que linhas vazias não desapareçam silenciosamente.
+
+## Correção 0.2.1 — metadados Yahoo
+
+A versão 0.2 exigia que history_metadata fosse dict. O yfinance também pode retornar HistoryMetadata, que implementa collections.abc.Mapping. Essa diferença causava a mensagem "Yahoo não forneceu metadados para conferir o instrumento" mesmo com metadados válidos. O coletor agora aceita Mapping (incluindo dict), mantendo obrigatórias as conferências de símbolo e moeda. Apenas esses dois campos são acessados; não convertemos o objeto inteiro em dict, pois outros campos podem carregar dados adicionais da rede. Não há mudança de configuração, dependências ou esquema de banco em relação à 0.2.
+
+Referência do fornecedor: https://github.com/ranaroussi/yfinance/blob/main/yfinance/scrapers/history.py (classe HistoryMetadata).
+
+## Atualizar sua instalação existente
+
+Extraia este pacote em uma pasta diferente da instalação atual e pare o Streamlit. Na pasta extraída que contém atualizar.py:
+
+```bash
+python atualizar.py --dest /caminho/da/instalacao/mercado_etf
+```
+
+O script verifica o destino e copia somente os arquivos do programa, criando uma pasta `backup_antes_v022_...` com os arquivos anteriores. Mantém seu config.json, banco, ambiente virtual, compose.yaml e senhas. O pacote não contém config.json para evitar sua substituição acidental. Se modificou os arquivos Python, compare suas mudanças com o backup. Em caso de falha de cópia, não inicie a aplicação até concluir a atualização ou restaurar os arquivos do backup.
+
+Entre no diretório da instalação e ative seu ambiente virtual. Como você já instalou yfinance para executar o teste, normalmente não é preciso instalar nada adicional. Caso necessário:
+
+```bash
+python -m pip install yfinance
+streamlit run app.py --server.address 127.0.0.1
+```
+
+As variáveis MERCADO_DB_PASSWORD e TWELVE_DATA_API_KEY continuam necessárias para banco/Twelve Data, no mesmo terminal. Yahoo não requer token adicional. A configuração enviada anteriormente funciona: BOVA11 e IVVB11 passam a usar yfinance por padrão. Se algum desses ativos tiver um provider explícito antigo, ajuste-o para `"provider": "yfinance"`. Se não houver esse campo, nenhuma alteração é necessária.
+
+Ao atualizar desde a versão original, a aplicação acrescenta cinco colunas em bars: adjusted_close, dividends, stock_splits, is_final e price_basis. Não elimina colunas nem registros. O usuário de banco precisa ser proprietário da tabela ou ter permissão para executar essa migração. Linhas antigas não recebem confirmação artificial de fechamento: refaça a coleta para atualizá-las. A versão 0.2.2 também cria a tabela bar_rejections; o usuário precisa de permissão CREATE no schema usado. Não elimina preços existentes.
+
+## Nova instalação
+
+Use Python 3.10+ (3.11 recomendado) e PostgreSQL 14+. Copie config.example.json para config.json e ajuste a conexão. Crie banco/usuário ou use compose.yaml:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+cp config.example.json config.json
+read -rsp 'Senha PostgreSQL: ' MERCADO_DB_PASSWORD
+export MERCADO_DB_PASSWORD
+echo
+read -rsp 'Chave Twelve Data: ' TWELVE_DATA_API_KEY
+export TWELVE_DATA_API_KEY
+echo
+docker compose up -d
+streamlit run app.py --server.address 127.0.0.1
 ```
 
-Para instalar PyTorch com suporte à sua versão de CUDA, siga o seletor de instalação oficial do PyTorch e verifique `python -c 'import torch; print(torch.cuda.is_available())'`. Se já possuir uma instalação CUDA adequada, mantenha-a ao instalar os demais pacotes.
+Docker é opcional; não execute o comando docker se usar seu PostgreSQL existente. O contêiner ocupa a porta local 5432; altere a porta e config se necessário. A aplicação usa a senha em variável de ambiente ou, se ela não existir, permite a autenticação padrão da libpq (por exemplo ~/.pgpass). Para CUDA, mantenha uma instalação PyTorch compatível com seu driver. Não é necessário reinstalar PyTorch para atualizar este projeto.
 
-Defina uma senha forte no terminal (o comando read não a imprime):
+Use apenas localmente ou atrás de uma infraestrutura autenticada: não há autenticação web nesta versão.
 
-```bash
-read -rsp 'Senha PostgreSQL: ' MERCADO_DB_PASSWORD; export MERCADO_DB_PASSWORD; echo
-read -rsp 'Chave Twelve Data: ' TWELVE_DATA_API_KEY; export TWELVE_DATA_API_KEY; echo
-```
+## Uso dos dados
 
-Escolha UMA das opções:
+Selecione BOVA11, intervalo 1day, e clique em Buscar dados do provedor. A legenda identifica yfinance e BOVA11.SA. Repita para IVVB11. A fonte efetivamente coletada é registrada; históricos de fontes distintas nunca são concatenados automaticamente.
 
-1. Banco em contêiner: `docker compose up -d`. O contêiner cria usuário e banco `mercado` na porta local 5432. Se essa porta estiver ocupada, altere `compose.yaml` e `database.port` no `config.json`. Uma senha alterada depois da primeira inicialização não modifica um banco já criado.
-2. Banco PostgreSQL existente: crie previamente banco e usuário com permissão CREATE no schema padrão. Ajuste `database` em `config.json`. A senha vem da variável `MERCADO_DB_PASSWORD`. A aplicação cria a tabela automaticamente; não instala extensões nem altera bancos existentes além da sua tabela `bars`.
+A coleta Yahoo usa 2 anos no diário, 5 dias em barras de 1 minuto e 1 mês nos intervalos 5 minutos/1 hora. Intradiário ainda não foi validado na conta do usuário; a existência de uma opção na interface não garante cobertura nem baixa latência. Não há coleta automática, atualização por timer, SLA ou limite de chamadas formal garantido pelo Yahoo. Não clique repetidamente após rate limit. Dado ausente não é preenchido com valores inventados.
 
-Execute `streamlit run app.py --server.address 127.0.0.1`. Abra o endereço mostrado no terminal. As variáveis existem somente nessa sessão de terminal. Não publique a interface na rede: este protótipo não possui autenticação nem criptografia.
+Yahoo recebe auto_adjust=False, back_adjust=False, repair=False, actions=True e keepna=True. Open/High/Low/Close são preservados conforme recebidos; isso não garante que a própria fonte nunca tenha ajustado eventos. Adj Close, dividendos e splits são guardados separadamente quando disponíveis. Não há reparo automático de preços ou eventos. Na coleta Yahoo, preços inválidos são isolados em quarentena; falhas de identidade/estrutura ou datas ambíguas rejeitam o lote inteiro antes da escrita. Metadados do Yahoo são conferidos por símbolo e moeda.
 
-## Uso
+O seletor Série para indicadores e treino permite Close ou Adj Close. Adj Close é a escolha inicial se houver essa coluna na fonte, mas o treino exige que ela esteja completa nas barras selecionadas. Não se preenchem buracos de Adj Close com Close. O gráfico principal mostra Close; a série ajustada pode ser ligada pela legenda. Preços ajustados não são preços de execução.
 
-Selecione ativo e intervalo, então clique em Buscar dados do provedor ou importe CSV. A consulta consome créditos da API; não há agendamento. As chamadas, o acesso aos instrumentos B3, os horários e as cotas precisam ser verificados no plano da conta. Falhas são exibidas sem interpretar respostas como preços. O campo exchange pode precisar ser ajustado em config.json conforme o código reconhecido pelo provedor; evite eliminar o identificador de bolsa se isso tornar o símbolo ambíguo. Ativos adicionais podem ser inseridos na lista assets, com id único, symbol, exchange quando aplicável, currency, kind e timezone IANA.
+## Barras provisórias e qualidade
 
-Formato CSV: UTF-8, cabeçalho `observed_at,open,high,low,close,volume`. Horário deve ter fuso explícito, por exemplo `2026-01-02T00:00:00-03:00`; volume pode estar vazio. Para barras diárias, o timestamp representa a data da sessão no fuso do mercado. Se não souber OHLC, não invente valores. Uma importação completa é transacional e repetições da mesma combinação ativo/intervalo/horário/fonte atualizam a linha existente. A importação apenas confirma os valores fornecidos e não identifica desdobramentos.
+A data diária é a data da sessão no fuso do mercado, não a hora de negociação. Conservadoramente, qualquer barra diária do dia da coleta fica provisória, mesmo depois do encerramento. Só uma nova coleta em outro dia pode atualizar sua classificação. A regra e o momento do recebimento são persistidos: apenas a passagem do tempo não promove um preço parcial antigo a definitivo. is_final indica essa regra local, não certificação do fechamento pelo provedor.
 
-A coleta Twelve Data usa timezone UTC para intradiário e identifica barras diárias pela data da sessão no fuso configurado para o ativo. Verifique se a convenção do provedor corresponde a cada instrumento antes de comparar sessões e datas. O horário de recebimento representa a importação, não o momento de negociação.
+O autoencoder usa apenas diários anteriores ao dia atual, confirmados no recebimento. Registros legados sem confirmação são excluídos na borda histórica; uma lacuna não confirmada entre sessões bloqueia o treino para evitar juntar retornos de vários dias. Lacunas de calendário sem registros não são detectadas nesta versão (ainda não há calendário oficial de pregões). Barras intradiárias são marcadas provisórias até o término do intervalo mais uma margem de um minuto; não são usadas pelo modelo atual.
 
-Atualização manual substitui dados da mesma fonte e timestamp, sem guardar versões anteriores; não fornece trilha histórica completa da informação disponível em cada momento. Essa limitação deve ser resolvida antes de simulações financeiras fiéis.
+Variações absolutas de pelo menos 8% por barra são destacadas para conferência. O limite pode ser alterado em analysis.jump_threshold. O limiar é uma heurística de revisão, não um teste de fraude/erro e nem uma regra de compra/venda. Movimentos reais intensos também podem ser sinalizados. Nenhuma observação é corrigida automaticamente. Variações extremas com preços estruturalmente válidos não são retiradas da série. Barras inválidas são preservadas separadamente na quarentena.
+
+No teste enviado pelo usuário, BOVA11 caiu de 201,69 para 172,42 de 23/10 para 26/10/2026 (aproximadamente -14,51%); IVVB11 passou de 430,00 para 468,54 (aproximadamente +8,96%). Conferir com fonte independente e eventos do ETF antes de interpretar o treinamento. Os valores apresentados não permitem determinar a causa desses movimentos.
+
+## Modelo
+
+Mantém o autoencoder experimental em PyTorch, com GPU quando disponível. Usa janelas de 20 retornos, treino cronológico de 75%, separação de janelas na fronteira e teste posterior. Média/desvio vêm apenas do treino. O mínimo de 251 preços finais é um requisito operacional; 496 registros permitem experimentar, mas não demonstram adequação estatística, previsibilidade ou rentabilidade. O erro de reconstrução não é uma probabilidade financeira; o percentil 99 é calculado no treino, sem calibração independente. Não há persistência do modelo, agrupamento de regimes, walk-forward, backtest, carteira simulada ou notícias.
+
+Históricos ajustados são a visão atual do fornecedor e podem ser revistos. A base faz upsert de cada barra, sem preservar todas as versões anteriores. Portanto não é um arquivo point-in-time adequado para simular o conhecimento passado sem verificações adicionais.
+
+## Adicionar ativos
+
+Mantenha id, symbol, currency, kind e timezone. Configure provider por ativo (yfinance ou twelvedata); para Yahoo use yahoo_symbol exato, por exemplo BOVA11.SA. Apenas BOVA11/IVVB11 recebem o sufixo .SA automaticamente se yahoo_symbol não for informado. Para novos ativos de B3, informe yahoo_symbol e provider explicitamente. Para Twelve Data, exchange identifica o nome da bolsa e mic_code identifica seu MIC; a compatibilidade B3/BVMF da correção anterior foi preservada.
+
+## CSV
+
+Cabeçalho mínimo: observed_at,open,high,low,close. Use fuso explícito, exemplo 2026-10-26T00:00:00-03:00. Volume, adjusted_close, dividends e stock_splits são opcionais. Use uma fonte própria, distinta dos coletores. A importação só marca barras como encerradas se você confirmar que o arquivo foi conferido. Mesmo assim o modelo exclui a data atual. Uma importação não prova o ajuste ou a qualidade da série.
+
+## Testes e evidências
+
+Foram aprovados 46 testes locais, além da compilação de todos os módulos. Execute `python -m unittest discover -s tests -v` na pasta extraída do pacote. Os testes verificam conversão de datas, identificação e moeda, rejeição de OHLC inválido, preservação das séries, roteamento de fontes, finalização conservadora, não preenchimento de ajustes, uso apenas do treino para normalização, escrita parametrizada simulada, backup/config e a correção Twelve Data. Os quatro testes adicionais da 0.2.1 verificam metadados Mapping válidos para ambos os ETFs sem acessar campos tardios, rejeição de símbolo/moeda incorretos, campos ausentes e formatos inválidos. Os nove testes adicionais da 0.2.2 verificam isolamento de barras ruins, preservação dos valores, rejeição estrutural, lote inteiramente inválido, transação compartilhada, datas de resolução e prevenção de retornos através de lacunas. Dependem de pandas e numpy; banco, GPU e provedores são simulados.
+
+Há também dois testes opcionais de integração PostgreSQL, não executados neste ambiente. Para executá-los, defina MERCADO_TEST_DB_DSN apontando para um banco de testes e rode a mesma suíte. Eles criam um schema de nome aleatório, removido ao terminar; não leem config.json. Exigem psycopg e permissão CREATE no banco de testes. Verificam migração idempotente, gravação/leitura, isolamento de fontes, resolução de pendências e rollback real. Sem essa variável, os dois testes são explicitamente ignorados.
+
+O usuário comprovou o download real de 496 registros para cada ETF com yfinance no seu ambiente. A integração nova foi verificada com respostas simuladas e compilação. Não foi executada contra um PostgreSQL real, Streamlit em execução, conta Twelve Data nem GPU neste ambiente.
+
+Fontes: https://ranaroussi.github.io/yfinance/reference/api/yfinance.download.html ; https://ranaroussi.github.io/yfinance/advanced/price_repair.html ; https://github.com/ranaroussi/yfinance ; https://twelvedata.com/docs . yfinance é independente do Yahoo e voltado a pesquisa/uso pessoal; consulte os termos da fonte para distribuição de dados.

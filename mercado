@@ -1,0 +1,16 @@
+#!/bin/bash
+
+source venv/bin/activate
+
+stty -echo -echoe -isig -icanon
+echo -n "Forneça sua senha do banco de dados: "
+read MERCADO_DB_PASSWORD
+stty echo echoe isig icanon
+
+export MERCADO_DB_PASSWORD
+export TWELVE_DATA_API_KEY="cfd981b8452b432fb680bf065b67889b"
+
+
+streamlit run app.py --server.address 127.0.0.1
+
+deactivate

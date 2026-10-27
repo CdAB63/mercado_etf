@@ -1,73 +1,135 @@
-import json, os, re
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
-import numpy as np
+import json
+import os
+from pathlib import Path
 import pandas as pd
-import psycopg
-import requests
+import numpy as np
+from market_data import validate_bars, diagnostics
 
-CONFIG = os.environ.get('MERCADO_CONFIG', 'config.json')
+BASE = Path(__file__).resolve().parent
+
+
 def config():
-    with open(CONFIG, encoding='utf-8') as f: return json.load(f)
+    path = Path(os.environ.get('MERCADO_CONFIG', str(BASE / 'config.json')))
+    with path.open(encoding='utf-8') as f:
+        return json.load(f)
+
+
 def connection():
-    d = config()['database'].copy(); password_env = d.pop('password_env')
-    d['password'] = os.environ.get(password_env, '')
-    return psycopg.connect(**d)
+    import psycopg
+    options = config()['database'].copy()
+    name = options.pop('password_env', 'MERCADO_DB_PASSWORD')
+    password = os.environ.get(name)
+    if password:
+        options['password'] = password
+    # Se a variável não existir, libpq ainda pode utilizar ~/.pgpass.
+    options.setdefault('connect_timeout', 10)
+    return psycopg.connect(**options)
+
+
 def init_db():
     with connection() as con:
-        with open(os.path.join(os.path.dirname(__file__), 'schema.sql'), encoding='utf-8') as f: con.execute(f.read())
+        con.execute((BASE / 'schema.sql').read_text(encoding='utf-8'))
+
+
 def fetch(asset, interval='1day', outputsize=500):
-    cfg = config()['provider']; key = os.getenv(cfg['api_key_env'])
-    if not key: raise ValueError('Defina a variável '+cfg['api_key_env'])
-    params = {'symbol': asset['symbol'], 'interval': interval, 'outputsize': outputsize, 'apikey': key, 'timezone': cfg['timezone']}
-    if asset.get('exchange'): params['exchange'] = asset['exchange']
-    try:
-        r = requests.get('https://api.twelvedata.com/time_series', params=params, timeout=30)
-    except requests.RequestException as exc:
-        raise RuntimeError('Falha de rede ao acessar o provedor') from None
-    if not r.ok: raise RuntimeError(f'Provedor respondeu HTTP {r.status_code}')
-    payload = r.json()
-    if payload.get('status') == 'error' or not payload.get('values'): raise ValueError(str(payload.get('message', 'Resposta sem dados')))
-    # O provedor retorna datas diárias como datas de sessão e horários intradiários no fuso solicitado.
-    df = pd.DataFrame(payload['values'])
-    df = df.rename(columns={'datetime':'observed_at'})
-    if interval == '1day':
-        df['observed_at'] = pd.to_datetime(df.observed_at, errors='raise').dt.tz_localize(ZoneInfo(asset['timezone']))
-    else:
-        df['observed_at'] = pd.to_datetime(df.observed_at, errors='raise').dt.tz_localize(ZoneInfo(cfg['timezone']))
-    return df
+    from collectors import fetch_market
+    return fetch_market(asset, config()['provider'], interval, outputsize)
+
 
 def save(df, asset, interval, source):
-    required = ['observed_at','open','high','low','close']
-    missing = set(required)-set(df.columns)
-    if missing: raise ValueError('Colunas ausentes: '+', '.join(sorted(missing)))
-    rows=[]
-    for _, row in df.iterrows():
-        t = pd.Timestamp(row['observed_at'])
-        if pd.isna(t) or t.tzinfo is None: raise ValueError('Datas devem conter fuso horário explícito.')
-        vals = [float(row[x]) for x in ['open','high','low','close']]
-        if not all(np.isfinite(vals)) or min(vals)<=0 or vals[1]<max(vals) or vals[2]>min(vals): raise ValueError('OHLC inválido: '+str(t))
-        v = row.get('volume'); v = None if pd.isna(v) or v == '' else float(v)
-        if v is not None and (not np.isfinite(v) or v < 0): raise ValueError('Volume inválido')
-        rows.append((asset, t.to_pydatetime(), interval, *vals, v, source))
+    if not source or not source.strip():
+        raise ValueError('Informe a fonte.')
+    basis = df.attrs.get('price_basis', 'imported_unknown')
+    rejected = df.attrs.get('quality_rejections', [])
+    data = df.copy() if df.empty and rejected else validate_bars(df)
+    rejection_rows = []
+    for item in rejected:
+        observed = pd.Timestamp(item['observed_at'])
+        received = pd.Timestamp(item['received_at'])
+        if pd.isna(observed) or pd.isna(received) or observed.tzinfo is None or received.tzinfo is None:
+            raise ValueError('Rejeição sem data/fuso válido.')
+        if not isinstance(item['reason'], str) or not item['reason'].strip():
+            raise ValueError('Rejeição sem motivo.')
+        if observed in pd.to_datetime(data['observed_at'], utc=True).tolist():
+            raise ValueError('Uma barra não pode ser válida e rejeitada na mesma coleta.')
+        rejection_rows.append((asset, interval, observed.to_pydatetime(), source.strip(),
+            received.to_pydatetime(), item['reason'], json.dumps(item['raw_bar'], allow_nan=False)))
+    def nullable(value):
+        return None if pd.isna(value) else float(value)
+    rows = []
+    for _, row in data.iterrows():
+        final = row.get('is_final')
+        if pd.isna(final):
+            final = None
+        elif not isinstance(final, (bool, np.bool_)):
+            raise ValueError('is_final inválido.')
+        else:
+            final = bool(final)
+        received = row.get('received_at')
+        if pd.isna(received):
+            received = pd.Timestamp.now(tz='UTC')
+        else:
+            received = pd.Timestamp(received)
+            if received.tzinfo is None:
+                raise ValueError('received_at deve ter fuso.')
+        rows.append((asset, row.observed_at.to_pydatetime(), interval,
+            *[float(row[c]) for c in ('open','high','low','close')],
+            nullable(row.volume), source.strip(), nullable(row.adjusted_close),
+            nullable(row.dividends), nullable(row.stock_splits), final, basis, received.to_pydatetime()))
+    sql = '''INSERT INTO bars
+        (asset_id, observed_at, interval, open, high, low, close, volume, source,
+         adjusted_close, dividends, stock_splits, is_final, price_basis, received_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (asset_id, interval, observed_at, source) DO UPDATE SET
+          open=EXCLUDED.open, high=EXCLUDED.high, low=EXCLUDED.low, close=EXCLUDED.close,
+          volume=EXCLUDED.volume, adjusted_close=EXCLUDED.adjusted_close,
+          dividends=EXCLUDED.dividends, stock_splits=EXCLUDED.stock_splits,
+          is_final=EXCLUDED.is_final, price_basis=EXCLUDED.price_basis, received_at=EXCLUDED.received_at'''
     with connection() as con:
         with con.cursor() as cur:
-            cur.executemany('''INSERT INTO bars(asset_id,observed_at,interval,open,high,low,close,volume,source)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (asset_id,interval,observed_at,source)
-                DO UPDATE SET open=EXCLUDED.open,high=EXCLUDED.high,low=EXCLUDED.low,close=EXCLUDED.close,volume=EXCLUDED.volume,received_at=now()''',rows)
+            if rows:
+                cur.executemany(sql, rows)
+                # Só uma barra válida recebida novamente resolve a sua rejeição.
+                # Datas ausentes desta coleta permanecem pendentes.
+                cur.executemany('''UPDATE bar_rejections SET resolved_at=%s
+                    WHERE asset_id=%s AND interval=%s AND observed_at=%s AND source=%s
+                      AND received_at <= %s''',
+                    [(r[14], asset, interval, r[1], source.strip(), r[14]) for r in rows])
+            if rejection_rows:
+                cur.executemany('''INSERT INTO bar_rejections
+                    (asset_id, interval, observed_at, source, received_at, reason, raw_bar)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    ON CONFLICT (asset_id, interval, observed_at, source) DO UPDATE SET
+                      received_at=EXCLUDED.received_at, reason=EXCLUDED.reason,
+                      raw_bar=EXCLUDED.raw_bar, resolved_at=NULL
+                    WHERE bar_rejections.received_at <= EXCLUDED.received_at''', rejection_rows)
     return len(rows)
 
+
 def load(asset, interval, source):
+    # Cursor DB-API explícito evita a advertência de read_sql com conexão psycopg.
     with connection() as con:
-        return pd.read_sql_query('SELECT observed_at, received_at, open, high, low, close, volume FROM bars WHERE asset_id=%s AND interval=%s AND source=%s ORDER BY observed_at',con,params=(asset,interval,source))
+        with con.cursor() as cur:
+            cur.execute('''WITH rejected AS (
+                SELECT observed_at, received_at, reason, raw_bar FROM bar_rejections
+                WHERE asset_id=%s AND interval=%s AND source=%s AND resolved_at IS NULL
+                )
+                SELECT b.observed_at, b.received_at, b.open, b.high, b.low, b.close, b.volume,
+                    b.adjusted_close, b.dividends, b.stock_splits, b.is_final, b.price_basis,
+                    NULL::text AS quality_error, NULL::jsonb AS quality_raw
+                FROM bars b WHERE b.asset_id=%s AND b.interval=%s AND b.source=%s
+                    AND NOT EXISTS (SELECT 1 FROM rejected q WHERE q.observed_at=b.observed_at)
+                UNION ALL
+                SELECT observed_at, received_at, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, FALSE, NULL, reason, raw_bar FROM rejected
+                ORDER BY observed_at''',
+                (asset, interval, source, asset, interval, source))
+            return pd.DataFrame(cur.fetchall(), columns=[c.name for c in cur.description])
+
+
 def sources(asset, interval):
     with connection() as con:
-        return [r[0] for r in con.execute('SELECT DISTINCT source FROM bars WHERE asset_id=%s AND interval=%s ORDER BY source',(asset,interval))]
-
-def diagnostics(df):
-    df=df.copy(); df['return']=df.close.pct_change(); df['vol20']=df['return'].rolling(20).std()
-    # Desvio usa somente a distribuição anterior, nunca a observação atual.
-    ref=df['return'].shift(1); median=ref.rolling(60,min_periods=30).median()
-    mad=ref.rolling(60,min_periods=30).apply(lambda x: np.median(np.abs(x-np.median(x))),raw=True)
-    df['robust_z']=(df['return']-median)/(1.4826*mad.replace(0,np.nan))
-    return df
+        return [r[0] for r in con.execute('''SELECT source FROM bars WHERE asset_id=%s AND interval=%s
+            UNION SELECT source FROM bar_rejections
+            WHERE asset_id=%s AND interval=%s AND resolved_at IS NULL ORDER BY source''',
+            (asset, interval, asset, interval))]

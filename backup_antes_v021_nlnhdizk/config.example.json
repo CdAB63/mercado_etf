@@ -1,0 +1,71 @@
+{
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "dbname": "mercado",
+    "user": "mercado",
+    "password_env": "MERCADO_DB_PASSWORD"
+  },
+  "provider": {
+    "name": "twelvedata",
+    "api_key_env": "TWELVE_DATA_API_KEY",
+    "timezone": "UTC"
+  },
+  "assets": [
+    {
+      "id": "BOVA11",
+      "symbol": "BOVA11",
+      "currency": "BRL",
+      "kind": "ETF",
+      "timezone": "America/Sao_Paulo",
+      "provider": "yfinance",
+      "yahoo_symbol": "BOVA11.SA"
+    },
+    {
+      "id": "IVVB11",
+      "symbol": "IVVB11",
+      "currency": "BRL",
+      "kind": "ETF",
+      "timezone": "America/Sao_Paulo",
+      "provider": "yfinance",
+      "yahoo_symbol": "IVVB11.SA"
+    },
+    {
+      "id": "SPY",
+      "symbol": "SPY",
+      "exchange": "NYSE",
+      "currency": "USD",
+      "kind": "ETF",
+      "timezone": "America/New_York",
+      "provider": "twelvedata"
+    },
+    {
+      "id": "QQQ",
+      "symbol": "QQQ",
+      "exchange": "NASDAQ",
+      "currency": "USD",
+      "kind": "ETF",
+      "timezone": "America/New_York",
+      "provider": "twelvedata"
+    },
+    {
+      "id": "USD_BRL",
+      "symbol": "USD/BRL",
+      "currency": "BRL",
+      "kind": "FX",
+      "timezone": "UTC",
+      "provider": "twelvedata"
+    },
+    {
+      "id": "EUR_BRL",
+      "symbol": "EUR/BRL",
+      "currency": "BRL",
+      "kind": "FX",
+      "timezone": "UTC",
+      "provider": "twelvedata"
+    }
+  ],
+  "analysis": {
+    "jump_threshold": 0.08
+  }
+}
