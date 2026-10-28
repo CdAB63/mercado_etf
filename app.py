@@ -2,11 +2,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from core import config, init_db, fetch, save, load, sources
-from market_data import provider_for, yahoo_symbol, diagnostics, training_frame, validate_bars
+from market_data import provider_for, yahoo_symbol, diagnostics, training_frame, validate_bars, select_model_period
 
 st.set_page_config(page_title='Mercado em perspectiva', layout='wide')
 st.title('Mercado em perspectiva')
-st.caption('Versão 0.2.2 • Pesquisa experimental de ETFs e câmbio • Coleta manual')
+st.caption('Versão 0.3.0 • Pesquisa experimental de ETFs e câmbio • Coleta manual')
 try:
     cfg = config()
     init_db()
@@ -25,6 +25,11 @@ except ValueError as exc:
 label = yahoo_symbol(asset) if provider == 'yfinance' else asset['symbol']
 st.sidebar.caption(f'Coleta: {provider} · {label}')
 st.sidebar.caption('Intervalo da barra não é garantia de atualização. Intradiário depende da fonte.')
+if interval == '1day' and provider == 'yfinance':
+    st.sidebar.caption('Coleta diária: todo o histórico disponível no Yahoo. A seleção do treino não limita a coleta.')
+elif provider == 'twelvedata':
+    st.sidebar.caption('Twelve Data: coleta atual de até 500 barras por consulta, conforme acesso do plano. '
+                       'Histórico completo automático está disponível no coletor Yahoo diário.')
 if provider == 'twelvedata' and st.sidebar.button('Diagnosticar no Twelve Data'):
     from twelvedata_client import diagnose
     try:
@@ -81,10 +86,14 @@ except Exception as exc:
 if df.empty:
     st.info('Nenhuma barra disponível.'); st.stop()
 
+stored_dates = pd.to_datetime(df.observed_at, utc=True).dt.tz_convert(asset['timezone']).dt.date
+st.caption(f'Histórico armazenado ({source}): {stored_dates.min()} a {stored_dates.max()} · '
+           f'{len(df)} datas, incluindo eventuais rejeições. Selecionar datas do modelo não apaga registros.')
+
 quarantine = df[df['quality_error'].notna()]
 if not quarantine.empty:
     st.warning(f'{len(quarantine)} barras em quarentena. Os demais preços foram preservados. '
-               'Confira abaixo os valores recebidos; o treino fica bloqueado enquanto houver pendências.')
+               'Confira abaixo os valores recebidos; janelas de treino não atravessam essas lacunas.')
     with st.expander('Barras em quarentena — valores recebidos e motivo', expanded=True):
         for _, item in quarantine.iterrows():
             local_time = pd.Timestamp(item.observed_at).tz_convert(asset['timezone'])
@@ -131,13 +140,37 @@ st.caption('Autoencoder experimental: erro de reconstrução não é probabilida
 if interval != '1day':
     st.info('O modelo desta versão usa somente barras diárias.')
 else:
+    final_rows = df[df.is_final.eq(True) & df.quality_error.isna()]
+    if final_rows.empty:
+        st.info('Nenhum fechamento final disponível para selecionar o período do modelo.')
+        st.stop()
+    final_dates = pd.to_datetime(final_rows.observed_at, utc=True).dt.tz_convert(asset['timezone']).dt.date
+    first_date, last_date = final_dates.min(), final_dates.max()
+    default_cut = final_dates.sort_values().iloc[int((len(final_dates)-1)*0.75)]
+    st.caption('Escolha o período de treino e o fim da avaliação posterior. '
+               'As datas são inclusivas no fuso do ativo. Os gráficos acima usam o histórico completo.')
+    date_cols = st.columns(3)
+    date_key = f'{asset_id}_{source}_{interval}'
+    start_date = date_cols[0].date_input('Início do treino', value=first_date,
+        min_value=first_date, max_value=last_date, key='train_start_'+date_key)
+    train_end = date_cols[1].date_input('Fim do treino', value=default_cut,
+        min_value=first_date, max_value=last_date, key='train_end_'+date_key)
+    test_end = date_cols[2].date_input('Fim da avaliação', value=last_date,
+        min_value=first_date, max_value=last_date, key='test_end_'+date_key)
     try:
-        ready = training_frame(df, basis, asset['timezone'])
+        selected = select_model_period(df, start_date, train_end, test_end, asset['timezone'])
+        ready = training_frame(selected, basis, asset['timezone'])
+        from model import prepare_windows
+        train_windows, test_windows, _, _ = prepare_windows(ready)
     except ValueError as exc:
         ready = None
         st.info(str(exc))
     if ready is not None:
-        st.caption(f'{len(ready)} fechamentos finais disponíveis. Série: {basis}. Confira as variações destacadas antes de interpretar resultados.')
+        st.caption(f'{len(ready)} fechamentos finais em {ready.segment_id.nunique()} segmentos. '
+                   f'Janelas: {len(train_windows)} de treino e {len(test_windows)} de teste. Série: {basis}. '
+                   'Cada janela usa 20 retornos e 21 preços, sem atravessar lacunas conhecidas.')
+        st.caption('last_evaluated_at no resultado identifica a data efetivamente avaliada; '
+                   'ela pode ser anterior à última barra disponível se o segmento mais recente for curto.')
         if st.button('Treinar autoencoder e avaliar por tempo'):
             try:
                 from model import analyze

@@ -9,7 +9,7 @@ def fetch_yahoo(asset, interval):
         import yfinance as yf
     except ImportError:
         raise ValueError('Instale yfinance no ambiente ativo: python -m pip install yfinance') from None
-    options = {'1day': ('1d', '2y'), '1min': ('1m', '5d'),
+    options = {'1day': ('1d', 'max'), '1min': ('1m', '5d'),
                '5min': ('5m', '1mo'), '1h': ('1h', '1mo')}
     if interval not in options:
         raise ValueError('Intervalo não suportado pelo coletor Yahoo.')

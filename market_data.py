@@ -159,24 +159,52 @@ def diagnostics(df, price_column='close', jump_threshold=0.08):
     return df
 
 
+def select_model_period(df, start, train_end, test_end, timezone='UTC'):
+    """Selecionar datas locais inclusivas sem alterar o histórico armazenado.
+
+    A seleção inclui treino e teste posterior. Janelas serão separadas no modelo.
+    """
+    def local_date(value):
+        value = pd.Timestamp(value)
+        if pd.isna(value):
+            raise ValueError('Informe todas as datas do período.')
+        if value.tzinfo is not None:
+            value = value.tz_convert(timezone)
+        return value.date()
+    start, train_end, test_end = map(local_date, (start, train_end, test_end))
+    if not start <= train_end < test_end:
+        raise ValueError('Use início do treino ≤ fim do treino < fim da avaliação.')
+    times = pd.to_datetime(df['observed_at'], utc=True)
+    dates = times.dt.tz_convert(timezone).dt.date
+    selected = df.loc[(dates >= start) & (dates <= test_end)].copy()
+    if selected.empty:
+        raise ValueError('Nenhuma barra armazenada no período escolhido.')
+    # Meia-noite do dia seguinte no fuso local, inclusive em transições de DST.
+    next_date = train_end + pd.Timedelta(days=1)
+    selected.attrs['train_end_exclusive'] = pd.Timestamp(next_date).tz_localize(
+        timezone, nonexistent='shift_forward', ambiguous=True).tz_convert('UTC').isoformat()
+    selected.attrs['model_period'] = {'train_start':str(start), 'train_end':str(train_end),
+                                    'test_end':str(test_end), 'timezone':timezone}
+    return selected
+
+
 def training_frame(df, price_column='close', timezone='UTC', now=None):
     """Somente uma série coerente de barras diárias finais; nunca mistura adj/raw."""
     if 'is_final' not in df:
         raise ValueError('Histórico sem classificação de fechamento. Refaça a coleta.')
-    if 'quality_error' in df and df['quality_error'].notna().any():
-        raise ValueError('Há barras em quarentena. Confira os valores recebidos e refaça a coleta; '
-                         'o treino fica bloqueado para não atravessar lacunas conhecidas.')
     ordered = df.sort_values('observed_at').reset_index(drop=True)
     now = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
     dates = pd.to_datetime(ordered['observed_at'], utc=True).dt.tz_convert(timezone).dt.date
     mask = ordered['is_final'].eq(True) & (dates < now.tz_convert(timezone).date())
-    # Não saltar buracos provisórios internos: isso juntaria retornos de múltiplas sessões.
+    if 'quality_error' in ordered:
+        mask &= ordered['quality_error'].isna()
+    # Cada interrupção conhecida cria um segmento independente.
+    segments = (~mask).cumsum()
     accepted = np.flatnonzero(mask.to_numpy())
     if not len(accepted):
         raise ValueError('Não há barras diárias finais. Refaça a coleta após o dia da sessão.')
-    if not mask.iloc[accepted[0]:accepted[-1]+1].all():
-        raise ValueError('Há barras antigas não confirmadas entre sessões. Refaça a coleta antes de treinar.')
     result = ordered.loc[mask].copy()
+    result['segment_id'] = segments.loc[mask].to_numpy()
     if price_column not in result:
         raise ValueError('Série solicitada não está disponível: '+price_column)
     values = pd.to_numeric(result[price_column], errors='coerce').to_numpy(dtype=float)
